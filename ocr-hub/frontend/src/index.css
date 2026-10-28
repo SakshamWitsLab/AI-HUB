@@ -1,0 +1,151 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --paper: #f7f6f2;       /* page */
+  --panel: #ffffff;       /* cards */
+  --ink: #1b2433;         /* text */
+  --ink-soft: #5c6a7e;
+  --line: #e2e0d8;
+  --azure: #2f5fef;
+  --scan: #0f9d8f;        /* result boxes / success */
+  --amber: #d97a06;       /* download state */
+}
+
+body {
+  @apply antialiased;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Space Grotesk", system-ui, sans-serif;
+}
+
+.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+/* --- shell ---------------------------------------------------------- */
+.shell { @apply min-h-screen flex; }
+
+.sidebar {
+  @apply shrink-0 flex flex-col gap-1 border-r px-4 py-6 sticky top-0 h-screen;
+  width: 218px; border-color: var(--line); background: var(--panel);
+}
+
+.brand { @apply flex items-baseline gap-1 px-2 pb-6 mb-2; }
+.brand h1 { @apply text-lg font-bold tracking-tight; }
+.brand span { color: var(--scan); @apply font-bold text-lg; }
+
+.nav-btn {
+  @apply flex items-center gap-2 rounded-md px-3 py-2 text-[15px] font-medium text-left;
+  color: var(--ink-soft);
+}
+.nav-btn:hover { background: color-mix(in srgb, var(--azure) 7%, transparent); color: var(--ink); }
+.nav-btn.active { color: var(--ink); background: color-mix(in srgb, var(--azure) 10%, transparent); }
+.nav-btn .count { @apply ml-auto text-xs mono; color: var(--ink-soft); }
+
+.sidebar-foot { @apply mt-auto flex flex-col gap-1 px-2 text-xs; color: var(--ink-soft); }
+.pill-ok { color: var(--scan); }
+.pill-no { @apply line-through; color: color-mix(in srgb, var(--ink-soft) 55%, transparent); }
+
+.content { @apply flex-1 px-8 py-6 min-w-0; }
+.content > .page-head { @apply flex items-baseline justify-between mb-5; }
+.content h2 { @apply text-2xl font-bold tracking-tight; }
+.content .page-sub { @apply text-sm; color: var(--ink-soft); max-width: 60ch; }
+
+/* --- bounding-box motif (the identity device) ----------------------- */
+.bbox { position: relative; }
+.bbox::before, .bbox::after {
+  content: ""; position: absolute; width: 10px; height: 10px;
+  border-color: var(--scan);
+}
+.bbox::before { top: 8px; left: 8px; border-top: 2px solid; border-left: 2px solid; }
+.bbox::after { bottom: 8px; right: 8px; border-bottom: 2px solid; border-right: 2px solid; }
+
+/* --- cards ---------------------------------------------------------- */
+.mcard {
+  @apply rounded-md p-4 flex flex-col gap-2 relative;
+  background: var(--panel); border: 1px solid var(--line);
+}
+.mcard:hover { border-color: color-mix(in srgb, var(--azure) 45%, var(--line)); }
+.mcard h3 { @apply text-[15px] font-semibold leading-tight; }
+.mcard .hf { @apply text-[11px] mono; color: var(--ink-soft); }
+.mcard .notes { @apply text-[13px] leading-snug; color: var(--ink-soft); }
+.mcard .meta { @apply flex flex-wrap gap-x-3 gap-y-1 text-[12px] mono; color: var(--ink-soft); }
+
+.tag {
+  @apply rounded px-1.5 py-0.5 text-[10px] mono uppercase tracking-wide;
+  background: color-mix(in srgb, var(--azure) 9%, transparent); color: var(--azure);
+}
+.tag.starter { background: color-mix(in srgb, var(--scan) 12%, transparent); color: var(--scan); }
+.tag.user { background: color-mix(in srgb, var(--amber) 14%, transparent); color: var(--amber); }
+
+.eng {
+  @apply absolute right-3 top-3 text-[10px] mono uppercase tracking-wide px-1.5 py-0.5 rounded;
+  border: 1px dashed color-mix(in srgb, var(--ink-soft) 45%, transparent); color: var(--ink-soft);
+}
+
+/* --- controls ------------------------------------------------------- */
+.btn {
+  @apply rounded-md px-3 py-1.5 text-sm font-medium transition;
+  background: var(--ink); color: var(--paper);
+}
+.btn:hover { background: #2c3550; color: #fff; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary { background: var(--azure); }
+.btn.primary:hover { background: #2454d6; }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.btn.ghost:hover { border-color: var(--ink-soft); color: var(--ink); }
+
+.input {
+  @apply rounded-md px-3 py-2 text-sm outline-none;
+  background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+}
+.input:focus { border-color: var(--azure); box-shadow: 0 0 0 3px color-mix(in srgb, var(--azure) 15%, transparent); }
+
+.chip {
+  @apply rounded-md border px-2.5 py-1 text-xs mono cursor-pointer select-none;
+  border-color: var(--line); color: var(--ink-soft); background: var(--panel);
+}
+.chip.on { border-color: var(--azure); color: var(--azure); background: color-mix(in srgb, var(--azure) 7%, transparent); }
+
+/* --- results -------------------------------------------------------- */
+.result { @apply rounded-md p-4 flex flex-col gap-2; background: var(--panel); border: 1px solid var(--line); }
+.result-head { @apply flex items-center gap-2; }
+.result-head b { @apply text-sm font-semibold; }
+.elapsed { @apply ml-auto text-[11px] mono; color: var(--ink-soft); }
+
+.viewbar { @apply flex gap-1; }
+.viewbar button {
+  @apply rounded px-2 py-0.5 text-[11px] mono;
+  border: 1px dashed var(--line); color: var(--ink-soft); background: transparent;
+}
+.viewbar button.on { border-style: solid; color: var(--scan); border-color: var(--scan); }
+.viewbar button:hover { color: var(--ink); }
+
+.err { @apply rounded p-2 text-sm; background: #fdf2f2; color: #b42318; border: 1px solid #f2c4c4; }
+pre.plain { @apply rounded p-2 text-xs overflow-auto; background: #f2f0ea; border: 1px solid var(--line); max-height: 320px; }
+
+.toast {
+  @apply fixed bottom-5 right-5 rounded-md px-4 py-2.5 text-sm shadow-lg;
+  background: var(--ink); color: var(--paper);
+}
+.toast.err { background: #7f1d1d; }
+
+.toast-stack { @apply fixed bottom-5 right-5 flex flex-col gap-2 z-50; }
+.toast-stack .toast { @apply px-4 py-2.5 text-sm shadow-lg rounded-md; }
+
+/* glass loading card */
+.loading-glass {
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-style: dashed;
+}
+.shimmer {
+  @apply rounded h-16 w-full;
+  background: linear-gradient(100deg, transparent 30%, rgba(47,95,239,.08) 50%, transparent 70%);
+  background-size: 200% 100%;
+  animation: slide 1.2s infinite;
+}
+@keyframes slide { from { background-position: 120% 0 } to { background-position: -20% 0 } }
+@media (prefers-reduced-motion: reduce) { .shimmer { animation: none } }
+.result.has-error { border-color: color-mix(in srgb, #b42318 35%, var(--line)); }

@@ -1,0 +1,15 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2
+websockets>=12
+huggingface_hub>=0.23
+requests>=2
+# --- OCR engines (lazily used; app still boots if these fail to import) ---
+pillow
+pytesseract
+# transformers 5.x breaks XLMRoberta tokenizer conversion for older repos like trocr
+transformers<5
+sentencepiece
+protobuf
+tiktoken
+torch

@@ -1,0 +1,29 @@
+# Local Python env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# App data — models downloaded by users live here (do NOT track weights)
+data/models/
+data/results/
+data/config.json   # contains your HuggingFace token
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Docker
+*.pid
+docker/config.yaml
+
+# misc
+.env

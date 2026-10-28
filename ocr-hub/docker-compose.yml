@@ -1,0 +1,37 @@
+services:
+  # CPU run:      docker compose --profile cpu up
+  ocr-hub:
+    build:
+      context: .
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cpu
+    container_name: ocr-hub
+    ports:
+      - "8990:8000"
+    environment:
+      - OCR_HUB_DATA=/data
+    volumes:
+      - ./data:/data
+    profiles: ["cpu"]
+
+  # GPU run:      docker compose --profile gpu up      (needs NVIDIA driver + nvidia container toolkit)
+  ocr-hub-gpu:
+    build:
+      context: .
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cu124
+    container_name: ocr-hub-gpu
+    ports:
+      - "8990:8000"
+    environment:
+      - OCR_HUB_DATA=/data
+    volumes:
+      - ./data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles: ["gpu"]
