@@ -218,6 +218,69 @@ def run_transformers(img_path: str, device: str = "cpu", config: dict | None = N
 
 
 # --------------------------------------------------------------------------- #
+# Docling runner (granite-docling) — generates DocTags, exports clean text
+# --------------------------------------------------------------------------- #
+def _doctags_to_text(doctags: str) -> str | None:
+    """Convert a DocTags string into readable text using the model authors'
+    reference library (docling-core). Returns None on any failure."""
+    try:
+        from docling_core.types.doc import DocTagsDocument, DoclingDocument
+        dt = DocTagsDocument.from_doctags_and_image_pairs([doctags], [None])
+        doc = DoclingDocument.load_from_doctags(dt, document_name="page")
+        try:
+            out = doc.export_to_text()
+        except Exception:
+            out = doc.export_to_markdown()
+        return (out or "").strip() or None
+    except Exception:
+        return None
+
+
+def _strip_doctags_fallback(doctags: str) -> str | None:
+    """Last-resort: drop structural tags, keep inner text nodes."""
+    import re
+    txt = re.sub(r"<[^>]+>", "\n", doctags)
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    return "\n".join(lines) or None
+
+
+def run_docling(img_path: str, device: str = "cpu", config: dict | None = None) -> list:
+    """granite-docling-258M: generates DocTags, converts to readable text.
+    Image long side is capped (config resize_longside_px, default 1024) so the
+    vision encoder sees a sane token count instead of the 2x PDF raster."""
+    tok, imgp, model = _load_tl(
+        config.get("hf_id") or "ibm-granite/granite-docling-258M",
+        config.get("local_path"), device,
+        bool(config.get("trust_remote_code", False)),
+    )
+    img = _load_image(img_path)
+    longside = int(config.get("resize_longside_px", 1024))
+    if max(img.size) > longside:
+        scale = longside / max(img.size)
+        img = img.resize((round(img.width * scale), round(img.height * scale)))
+
+    prompt = config.get("prompt", "Convert this page to docling.")
+    inputs = {k: v.to(device) for k, v in tok(images=img, text=prompt, return_tensors="pt").items()}
+    import torch
+
+    lock = _MPS_LOCK if device == "mps" else _NoLock()
+    with torch.no_grad(), lock:
+        gen = model.generate(
+            **inputs,
+            max_new_tokens=int(config.get("max_new_tokens", 4096)),
+            do_sample=False,
+            no_repeat_ngram_size=4,
+        )
+    trimmed = gen[:, inputs["input_ids"].shape[1]:]
+    doctags = tok.batch_decode(trimmed, skip_special_tokens=False)[0]
+    text = (_doctags_to_text(doctags) or _strip_doctags_fallback(doctags)
+            or tok.batch_decode(trimmed, skip_special_tokens=True)[0])
+    w, h = img.size
+    return [{"text": text, "confidence": None, "box": [0, 0, w, h],
+             "engine": "docling", "model_id": config.get("hf_id"), "detail": "doctags"}]
+
+
+# --------------------------------------------------------------------------- #
 # PaddleOCR(-VL)
 # --------------------------------------------------------------------------- #
 def run_paddle(img_path: str, device: str = "cpu") -> list:
@@ -254,6 +317,10 @@ def dispatch(engine: str, img_path: str, device: str = "cpu", config: dict | Non
         return run_easyocr(img_path, device, lang=(config or {}).get("lang", "en"))
     if engine == "paddleocr":
         return run_paddle(img_path, device)
+    if engine == "docling":
+        cfg = (config or {}).copy()
+        cfg["hf_id"] = cfg.get("hf_id") or "ibm-granite/granite-docling-258M"
+        return run_docling(img_path, device, cfg)
     if engine in ("transformers", "docling", "auto"):
         return run_transformers(img_path, device, config)
     raise ValueError(f"Unknown engine '{engine}'")

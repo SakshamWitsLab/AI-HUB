@@ -16,7 +16,7 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir \
         fastapi "uvicorn[standard]" websockets huggingface_hub requests pytesseract pillow \
-        pymupdf "transformers<5" sentencepiece protobuf tiktoken simpleitk \
+        pymupdf "transformers<5" sentencepiece protobuf tiktoken simpleitk docling-core \
     && pip install --no-cache-dir torch torchvision --index-url ${TORCH_INDEX} \
     && pip install --no-cache-dir easyocr
 

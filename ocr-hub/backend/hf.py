@@ -90,10 +90,26 @@ class DownloadManager:
         return self.notify("run", **kw)
 
     def start(self, repo: str) -> dict:
-        if repo in self.jobs and self.jobs[repo].get("status") == "running":
+        j = self.jobs.get(repo)
+        if j and j.get("status") == "running":
             return {"ok": True, "already_running": True}
+        if j and j.get("status") == "paused":
+            # resume from existing .part files
+            j["status"] = "queued"
+            j["pause_requested"] = False
+            self._emit(repo, status="running", progress=j.get("progress", 0))
+            threading.Thread(target=self._run, args=(repo,), daemon=True).start()
+            return {"ok": True, "resumed": True}
         self.jobs[repo] = {"status": "queued", "progress": 0}
         threading.Thread(target=self._run, args=(repo,), daemon=True).start()
+        return {"ok": True}
+
+    def pause(self, repo: str) -> dict:
+        j = self.jobs.get(repo)
+        if not j or j.get("status") not in ("running", "queued"):
+            return {"ok": False, "error": f"not running (status: {j and j.get('status')})"}
+        j["pause_requested"] = True
+        self._emit(repo, status="pausing", progress=j.get("progress", 0))
         return {"ok": True}
 
     def _dir_size(self, p: Path) -> int:
@@ -106,46 +122,120 @@ class DownloadManager:
                     pass
         return t
 
+    DOWNLOAD_EXTS = (".safetensors", ".bin", ".paddle", ".pdiparams", ".pth", ".onnx",
+                     ".json", ".txt", ".model", ".tiktoken", ".md", ".jinja")
+    DOWNLOAD_PREFIXES = (
+        "tokenizer*", "vocab*", "merges*", "special_tokens*", "added_tokens*",
+        "preprocessor*", "chat_template*", "generation_config*", "inference*",
+    )
+
+    def _stream_file(self, repo: str, url: str, dest: Path,
+                     base: int = 0, file_size: int = 0, expected: int = 0) -> bool:
+        """Stream one HF file to `dest`, honoring pause. Returns True when the
+        file is fully present on disk — resuming from `dest.part` (HTTP Range).
+        Emits a WS progress event whenever the whole-percent changes, so multi-GB
+        weight files show a moving bar instead of holding at 0% until done."""
+        import requests
+
+        part = Path(str(dest) + ".part")
+        headers = {"Authorization": f"Bearer {store.hf_token()}"} if store.hf_token() else {}
+        offset = part.stat().st_size if part.exists() else 0
+        try:
+            head = requests.head(url, headers=headers, timeout=30, allow_redirects=True)
+            total = int(head.headers.get("content-length", 0)) or (file_size or None)
+        except Exception:
+            total = file_size or None
+        if offset and total and offset >= total:
+            part.rename(dest)
+            return True
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+
+        r = requests.get(url, headers=headers, stream=True, timeout=(15, 60), allow_redirects=True)
+        r.raise_for_status()
+        if r.status_code == 200 and offset:  # server ignored the Range — restart file
+            offset = 0
+        with open(part, "ab" if offset else "wb") as f:
+            written = offset
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                if self.jobs.get(repo, {}).get("pause_requested"):
+                    return False
+                if chunk:
+                    f.write(chunk)
+                    written += len(chunk)
+                    if expected:
+                        pct = min(int((base + written) / expected * 95), 95)
+                        cur = self.jobs[repo].get("progress", 0)
+                        if pct != cur:
+                            self.jobs[repo]["progress"] = pct
+                            self._emit(repo, progress=pct)
+        part.rename(dest)
+        return True
+
     def _run(self, repo: str):
         self._emit(repo, status="running", progress=0)
         dest = store.model_path(repo)
         try:
             dest.mkdir(parents=True, exist_ok=True)
-            # expected total size from metadata (weights+config)
+            expected = 0
+            files = []
             try:
+                import fnmatch
                 meta = fetch_metadata(repo)
-                expected = sum(f["size"] or 0 for f in meta["files"])
+                wanted = set()
+                for pat in self.DOWNLOAD_PREFIXES:
+                    for f in meta["files"]:
+                        if fnmatch.fnmatch(f["rfilename"], pat):
+                            wanted.add(f["rfilename"])
+                for f in meta["files"]:
+                    name = f["rfilename"]
+                    if name.endswith(self.DOWNLOAD_EXTS) or name in wanted:
+                        files.append((name, int(f["size"] or 0)))
+                expected = sum(sz for _, sz in files)
             except Exception:
-                expected = 0
-
-            def poll():
-                while self.jobs.get(repo, {}).get("status") == "running":
-                    if expected:
-                        pct = min(int(self._dir_size(dest) / expected * 95), 95)
-                        self._emit(repo, progress=pct)
-                    time.sleep(1.5)
-
-            poller = threading.Thread(target=poll, daemon=True)
-            poller.start()
-
-            from huggingface_hub import snapshot_download
-
-            patterns = [
-                "*" + e for e in (
-                    ".safetensors", ".bin", ".paddle", ".pdiparams", ".pth", ".onnx",
-                    ".json", ".txt", ".model", ".tiktoken", ".md", ".jinja", ".model",
+                files = []
+            if not files:  # fallback: snapshot as before via hub library
+                from huggingface_hub import snapshot_download
+                patterns = [
+                    "*" + e for e in (".safetensors", ".bin", ".paddle", ".pdiparams", ".pth", ".onnx",
+                                      ".json", ".txt", ".model", ".tiktoken", ".md", ".jinja")
+                ] + list(self.DOWNLOAD_PREFIXES)
+                snapshot_download(
+                    repo_id=repo, local_dir=str(dest), allow_patterns=patterns,
+                    token=store.hf_token() or None, max_workers=4,
                 )
-            ] + ["tokenizer*", "vocab*", "merges*", "special_tokens*", "added_tokens*", "preprocessor*", "chat_template*", "generation_config*", "inference*"]
-            snapshot_download(
-                repo_id=repo,
-                local_dir=str(dest),
-                allow_patterns=patterns,
-                token=store.hf_token() or None,
-                max_workers=4,
-            )
+            else:
+                downloaded = 0  # counted per file (complete + resumed offset)
+                for name, sz in files:
+                    if self.jobs.get(repo, {}).get("pause_requested"):
+                        break
+                    target = dest / name
+                    # keep HF's relative path structure
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.exists():
+                        url = f"https://huggingface.co/{repo}/resolve/main/{name}"
+                        ok = self._stream_file(repo, url, target, base=downloaded,
+                                               file_size=sz, expected=expected)
+                        if not ok:
+                            break  # paused mid-file
+                        downloaded += (target.stat().st_size)
+                        if expected:
+                            pct = min(int(downloaded / expected * 95), 95)
+                            if pct != self.jobs[repo].get("progress", 0):
+                                self._emit(repo, progress=pct)
+                    else:
+                        downloaded += target.stat().st_size  # already on disk (resumed)
+
+                if self.jobs.get(repo, {}).get("pause_requested"):
+                    j = self.jobs[repo]
+                    j["status"] = "paused"
+                    j.pop("pause_requested", None)
+                    self._emit(repo, status="paused", progress=j.get("progress", 0))
+                    return
+
             weight_ok = any(
                 p.suffix in (".safetensors", ".bin", ".paddle", ".pdiparams", ".pth", ".onnx")
-                for p in dest.rglob("*")
+                for p in dest.rglob("*") if p.is_file()
             )
             if weight_ok:
                 store.mark_installed(repo)

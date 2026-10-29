@@ -13,6 +13,15 @@
   --amber: #d97a06;       /* download state */
 }
 
+/* dark mode — same hues, dark lightness levels */
+[data-theme="dark"] {
+  --paper: #10131a;
+  --panel: #171b26;
+  --ink: #e7ebf4;
+  --ink-soft: #9aa7bd;
+  --line: #2a3040;
+}
+
 body {
   @apply antialiased;
   background: var(--paper);
@@ -149,3 +158,25 @@ pre.plain { @apply rounded p-2 text-xs overflow-auto; background: #f2f0ea; borde
 @keyframes slide { from { background-position: 120% 0 } to { background-position: -20% 0 } }
 @media (prefers-reduced-motion: reduce) { .shimmer { animation: none } }
 .result.has-error { border-color: color-mix(in srgb, #b42318 35%, var(--line)); }
+
+/* architecture viewer (Catalog cards) */
+.arch-panel { display: flex; flex-direction: column; gap: 8px; }
+.glass-block {
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--line);
+}
+[data-theme="dark"] .glass-block { background: color-mix(in srgb, var(--panel) 96%, transparent); }
+.flow-block {
+  @apply mt-0 flex items-center justify-between gap-2 rounded px-2.5 py-1.5 text-xs;
+  border: 1px solid color-mix(in srgb, var(--azure) 30%, transparent);
+  background: color-mix(in srgb, var(--azure) 8%, transparent);
+}
+.arch-stack { border: 1px solid rgba(128, 128, 128, .25); }
+.arch-arrow {
+  text-align: center;
+  color: color-mix(in srgb, var(--azure) 70%, transparent);
+  font-size: 10px;
+  line-height: 1;
+  margin: 2px 0;
+}
+.arch-open { overflow: hidden; }

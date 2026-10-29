@@ -9,6 +9,9 @@ export const api = {
   add: (repo) => fetch(`/api/models/add?repo=${encodeURIComponent(repo)}`, { method: 'POST' }).then(j),
   download: (repo) => fetch(`/api/models/${encodeURIComponent(repo)}/download`, { method: 'POST' }).then(j),
   devices: () => fetch('/api/devices').then(j),
+  compare: (ids) => fetch(`/api/models/compare?ids=${ids.map(encodeURIComponent).join(',')}`).then(j),
+  arch: (repo) => fetch(`/api/models/arch/${repo}`).then(j),
+  pauseDownload: (repo) => fetch(`/api/models/${repo}/download/pause`, { method: 'POST' }).then(j),
   settings: () => fetch('/api/settings').then(j),
   saveSettings: (patch) =>
     fetch('/api/settings', {

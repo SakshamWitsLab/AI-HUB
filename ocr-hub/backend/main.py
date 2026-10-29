@@ -11,7 +11,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -50,6 +50,230 @@ def _merge_catalog():
 @app.get("/api/models")
 def list_models():
     return {"models": _merge_catalog(), "downloads": hf.downloads.status()}
+
+
+# --------------------------------------------------------------------------- #
+# Compare — model-card facts + live HF metadata
+# --------------------------------------------------------------------------- #
+# Facts here are strictly limited to what each model's official model card
+# (or this hub's own runner configuration) states. Anything we can't verify
+# is left out — the UI renders "unknown" instead.
+MODEL_FACTS: dict[str, dict] = {
+    "PaddlePaddle/PaddleOCR-VL-1.6": {
+        "kind": "Document-parse VLM",
+        "scope": "Full pages — text, layout, tables, formulas",
+        "output": "Structured layout + text (doc-parsing pipeline)",
+        "hardware": "GPU recommended, CPU possible",
+        "strengths": "109-language text recognition; strong table & formula parsing",
+    },
+    "microsoft/trocr-small-printed": {
+        "kind": "Line OCR (encoder-decoder)",
+        "scope": "Printed single text lines — not full pages",
+        "output": "Plain text per cropped line",
+        "hardware": "Runs comfortably on CPU",
+        "strengths": "Tiny (61M transcription head); lower-latency TrOCR variant",
+    },
+    "microsoft/trocr-small-handwritten": {
+        "kind": "Line OCR (encoder-decoder)",
+        "scope": "Handwritten single text lines — not full pages",
+        "output": "Plain text per cropped line",
+        "hardware": "Runs comfortably on CPU",
+        "strengths": "Tiny handwriting specialist; works best with line crops",
+    },
+    "microsoft/trocr-base-printed": {
+        "kind": "Line OCR (encoder-decoder)",
+        "scope": "Printed single text lines — higher-capacity variant",
+        "output": "Plain text per cropped line",
+        "hardware": "CPU-capable, slower than small",
+        "strengths": "Higher accuracy than small variant on printed lines",
+    },
+    "microsoft/trocr-base-handwritten": {
+        "kind": "Line OCR (encoder-decoder)",
+        "scope": "Handwritten single text lines — higher-capacity variant",
+        "output": "Plain text per cropped line",
+        "hardware": "CPU-capable, slower than small",
+        "strengths": "Higher accuracy than small variant on handwriting",
+    },
+    "nvidia/nemotron-ocr-v2": {
+        "kind": "Detection + recognition",
+        "scope": "Full pages — text with layout",
+        "output": "Recognized text",
+        "hardware": "Requires CUDA + Linux (builds a C++ extension); not for macOS/CPU",
+    },
+    "nvidia/nemotron-ocr-v1": {
+        "kind": "Detection + recognition",
+        "scope": "Full pages — compact checkpoint",
+        "output": "Recognized text",
+        "hardware": "Requires CUDA + Linux (same runner requirement as v2)",
+    },
+    "lightonai/LightOnOCR-1B-1025": {
+        "kind": "End-to-end document VLM",
+        "scope": "Full pages — document images",
+        "output": "Markdown",
+        "hardware": "GPU recommended",
+    },
+    "ibm-granite/granite-docling-258M": {
+        "kind": "Document-parse VLM (Docling family)",
+        "scope": "Full pages — tables, formulas, layout structure",
+        "output": "DocTags (structured) — convertible to markdown/HTML",
+        "hardware": "Small enough for CPU; GPU for speed",
+        "strengths": "258M — runs fast, produces structured DocTags",
+    },
+    "stepfun-ai/GOT-OCR2_0": {
+        "kind": "General OCR model (unified)",
+        "scope": "Full pages — plain text, formulas, tables, charts",
+        "output": "Plain text / structured per prompt mode",
+        "hardware": "GPU recommended",
+    },
+    "microsoft/Florence-2-large": {
+        "kind": "General vision multimodal",
+        "scope": "OCR, object detection, captioning via task prompts",
+        "output": "Boxes + text per selected task",
+        "hardware": "GPU recommended",
+    },
+    "nanonets/Nanonets-OCR-s": {
+        "kind": "End-to-end document VLM",
+        "scope": "Full pages — document images to rich markdown",
+        "output": "Markdown (LaTeX formulas, table HTML)",
+        "hardware": "GPU recommended (3.8B)",
+    },
+    "builtin:easyocr": {
+        "kind": "Detection + recognition (CRAFT + CRNN)",
+        "scope": "Full pages — line boxes + text",
+        "output": "Boxes + text",
+        "hardware": "CPU-friendly; language packs download on first use",
+        "strengths": "Supports 80+ languages",
+    },
+    "builtin:tesseract": {
+        "kind": "Classic OCR engine (LSTM)",
+        "scope": "Full pages — text (+ optional TSV boxes)",
+        "output": "Plain text (+ boxes)",
+        "hardware": "Very fast on CPU",
+        "strengths": "100+ language packs, decades of tuning",
+    },
+    "SoMarkAI/OXR-1.0": {
+        "kind": "Cloud API (runs remotely)",
+        "scope": "Full pages — document parsing",
+        "output": "Markdown / JSON with layout boxes",
+        "hardware": "None locally — file is uploaded to SoMark's free endpoint",
+    },
+}
+
+_COMPARE_CACHE: dict = {}  # ids-key -> (timestamp, payload)
+_COMPARE_TTL = 600  # seconds
+
+
+_ARCH_CACHE: dict = {}     # repo -> (timestamp, payload)
+_ARCH_KEYS = (
+    "model_type", "architectures", "dtype", "max_position_embeddings",
+    "hidden_size", "num_hidden_layers", "num_attention_heads",
+    "num_key_value_heads", "intermediate_size", "hidden_act", "vocab_size",
+)
+
+
+def _arch_summary(c: dict) -> dict:
+    """Keep only config fields that exist — verbatim from the published file."""
+    return {k: c[k] for k in _ARCH_KEYS if k in c}
+
+
+@app.get("/api/models/arch/{repo:path}")
+def model_arch(repo: str):
+    """Published architecture config, fetched straight from the model authors'
+    config.json on HuggingFace. Built-ins/cloud with no published config reply
+    {available: false} — we never draw an invented diagram."""
+    import urllib.request
+
+    if repo.startswith("builtin:"):
+        return {"available": False, "reason": "Built-in engine — part of this hub; no HF config.json is published."}
+    hit = _ARCH_CACHE.get(repo)
+    if hit and time.time() - hit[0] < _COMPARE_TTL:
+        return hit[1]
+
+    url = f"https://huggingface.co/{repo}/resolve/main/config.json"
+    try:
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {store.hf_token()}"} if store.hf_token() else {})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            cfg = json.loads(r.read())
+    except Exception as e:
+        payload = {"available": False,
+                   "reason": f"No published config.json reachable ({str(e)[:120]})."}
+        _ARCH_CACHE[repo] = (time.time(), payload)
+        return payload
+
+    main = _arch_summary(cfg)
+    subs = []
+    for key, val in cfg.items():
+        if isinstance(val, dict) and ("model_type" in val or "architectures" in val):
+            subs.append({"name": key, **_arch_summary(val)})
+    payload = {"available": True, "repo": repo, "main": main, "subs": subs,
+               "facts": MODEL_FACTS.get(repo, {}), "source_url": url, "raw": cfg}
+    # attach live HF metadata for the detail view (best effort)
+    found = {c["hf_id"]: c.get("cloud") for c in store.load_catalog()}
+    if not repo.startswith("builtin:") and not found.get(repo):
+        try:
+            meta = hf.fetch_metadata(repo)
+            payload["live"] = {"license": meta["license"], "downloads": meta["downloads"],
+                               "likes": meta["likes"], "gated": meta["gated"],
+                               "asof": time.strftime("%b %d, %Y"),
+                               "url": meta["url"]}
+        except Exception:
+            payload["live"] = None
+    _ARCH_CACHE[repo] = (time.time(), payload)
+    return payload
+
+
+@app.get("/api/models/compare")
+def compare_models(ids: str):
+    """Side-by-side specs for selected models. Live HuggingFace metadata is
+    fetched best-effort; if a fetch fails (or it's a built-in/cloud model),
+    stored catalog values are used and marked `live: false`."""
+    sel = [i for i in ids.split(",") if i][:6]
+    if not sel:
+        raise HTTPException(400, "Select at least one model")
+    cache_key = ",".join(sorted(sel))
+    now = time.time()
+    hit = _COMPARE_CACHE.get(cache_key)
+    if hit and now - hit[0] < _COMPARE_TTL:
+        return hit[1]
+
+    found = {c["hf_id"]: c for c in store.load_catalog()}
+    out_models = []
+    for hf_id in sel:
+        card = dict(found.get(hf_id) or {"hf_id": hf_id, "name": hf_id.split("/")[-1],
+                                         "engine": "transformers"})
+        card["installed"] = (
+            True if (hf_id.startswith("builtin:") or card.get("cloud"))
+            else store.is_installed(hf_id)
+        )
+        live = {}
+        ok = False
+        if not hf_id.startswith("builtin:") and not card.get("cloud"):
+            try:
+                live = hf.fetch_metadata(hf_id)
+                ok = True
+            except Exception:
+                live = {}
+        out_models.append({
+            "card": card,
+            "facts": MODEL_FACTS.get(hf_id, {}),
+            "live": {
+                "ok": ok,
+                "size_gb": live.get("size_gb", card.get("size_gb")),
+                "params": live.get("params", card.get("params")),
+                "license": live.get("license", card.get("license", "unknown")),
+                "downloads": live.get("downloads", card.get("downloads", 0)),
+                "likes": live.get("likes", card.get("likes", 0)),
+                "pipeline": live.get("pipeline"),
+                "url": live.get("url") or (f"https://huggingface.co/{hf_id}"
+                                           if not hf_id.startswith("builtin:") else None),
+                "gated": live.get("gated", card.get("gated", False)),
+            },
+            "asof": time.strftime("%b %d, %Y") if ok else None,
+        })
+    payload = {"models": out_models, "device": devices.detect()}
+    _COMPARE_CACHE[cache_key] = (now, payload)
+    return payload
 
 
 @app.get("/api/models/preview")
@@ -98,6 +322,14 @@ def download_model(repo: str):
     return hf.downloads.start(repo)
 
 
+@app.post("/api/models/{repo:path}/download/pause")
+def pause_download(repo: str):
+    out = hf.downloads.pause(repo)
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("error", "cannot pause"))
+    return out
+
+
 @app.delete("/api/models/{repo:path}")
 def uninstall_model(repo: str):
     """Remove an installed model's files — leaves the card pre-registered."""
@@ -108,6 +340,10 @@ def uninstall_model(repo: str):
         import shutil
 
         shutil.rmtree(p)
+    mp = store.model_path(repo)
+    if mp.exists():
+        for part in mp.rglob("*.part"):
+            part.unlink(missing_ok=True)
     hf.downloads.jobs.pop(repo, None)
     return {"ok": True, "removed": repo}
 
@@ -324,8 +560,48 @@ def _run_one(hf_id: str, img_path: str, device: str, cfg: dict | None = None,
             os.unlink(tmp_cfg)
 
 
+def _execute_run(run_id: str, pages: list[str], model_ids: list[str], device: str,
+                 settings: dict, found: dict) -> None:
+    """Run every model × page, emitting live WS events as each one finishes.
+    Runs after the HTTP response has been sent — the UI hydrates over /ws."""
+
+    def cfg_for(hf_id: str) -> dict:
+        c = found.get(hf_id, {})
+        return {
+            "trust_remote_code": c.get("trust_remote_code", False),
+            "prompt": (
+                "Convert this page to docling."
+                if hf_id.startswith("ibm-granite/granite-docling")
+                else c.get("prompt", "Perform OCR on this image. Return the extracted text.")
+            ),
+        }
+
+    pool = ThreadPoolExecutor(max_workers=max(settings.get("parallel_limit", 4), 1))
+    try:
+        # one flat queue: every (page, model) job is independent, so a slow job
+        # never blocks the others — they start as soon as a worker slot frees
+        tasks = {}
+        for idx, page_path in enumerate(pages):
+            ctx = {"run_id": run_id, "page": idx + 1, "image": str(page_path)}
+            for hf_id in model_ids:
+                tasks[(idx + 1, hf_id)] = pool.submit(
+                    _run_one, hf_id, str(page_path), device, cfg_for(hf_id), ctx)
+        for (page_no, hf_id), fut in tasks.items():
+            try:
+                fut.result()
+            except Exception as e:  # _run_one already notifies on all paths
+                hf.downloads.run_event(run_id=run_id, page=page_no, model_id=hf_id,
+                                       status="done", result={
+                                           "model_id": hf_id, "name": hf_id,
+                                           "error": str(e)[:400], "blocks": [],
+                                           "elapsed_s": None})
+    finally:
+        pool.shutdown(wait=False)
+        hf.downloads.notify("run", run_id=run_id, status="complete")
+
+
 @app.post("/api/run")
-async def run(req: RunRequest):
+async def run(req: RunRequest, background: BackgroundTasks):
     if not req.model_ids:
         raise HTTPException(400, "Select at least one model")
     raw = req.image
@@ -351,40 +627,10 @@ async def run(req: RunRequest):
         src.write_bytes(data)
         pages = [str(src)]
 
-    def cfg_for(hf_id: str) -> dict:
-        c = found.get(hf_id, {})
-        return {
-            "trust_remote_code": c.get("trust_remote_code", False),
-            "prompt": (
-                "Convert this page to docling."
-                if hf_id.startswith("ibm-granite/granite-docling")
-                else c.get("prompt", "Perform OCR on this image. Return the extracted text.")
-            ),
-        }
-
-    pool = ThreadPoolExecutor(max_workers=max(settings.get("parallel_limit", 4), 1))
-    loop = asyncio.get_running_loop()
     run_id = f"r{uuid.uuid4().hex[:8]}"
-    page_results = []
-    for idx, page_path in enumerate(pages):
-        ctx = {"run_id": run_id, "page": idx + 1, "image": str(page_path)}
-        tasks = {
-            hf_id: loop.run_in_executor(pool, _run_one, hf_id, str(page_path), device,
-                                        cfg_for(hf_id), ctx)
-            for hf_id in req.model_ids
-        }
-        results = []
-        for hf_id, fut in tasks.items():
-            try:
-                results.append(await fut)
-            except Exception as e:
-                results.append({"model_id": hf_id, "name": hf_id, "error": str(e)[:400], "blocks": [], "elapsed_s": None})
-        page_results.append({
-            "page": idx + 1,
-            "image": str(page_path),
-            "results": results,
-        })
-    return {"run_id": run_id, "device": device, "is_pdf": is_pdf, "n_pages": len(pages), "pages": page_results}
+    background.add_task(_execute_run, run_id, pages, req.model_ids, device, settings, found)
+    return {"run_id": run_id, "device": device, "is_pdf": is_pdf, "n_pages": len(pages),
+            "pages": [{"page": i + 1, "image": str(p)} for i, p in enumerate(pages)]}
 
 
 class RetryRequest(BaseModel):

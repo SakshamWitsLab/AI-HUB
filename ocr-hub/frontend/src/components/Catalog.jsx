@@ -1,10 +1,17 @@
 import React, { useMemo, useState } from 'react'
 import { api } from '../api'
+import ModelDetail from './ModelDetail'
 
-function ModelCard({ m, onDownload, reload }) {
+function ModelCard({ m, onDownload, reload, dlJob }) {
   const [busy, setBusy] = useState(false)
+  const [detail, setDetail] = useState(false)
   const installed = m.installed && !m.hf_id.startsWith('builtin:')
   const builtin = m.hf_id.startsWith('builtin:')
+  const status = dlJob?.status
+  const dlActive = ['running', 'queued', 'pausing'].includes(status)
+  const dlPaused = status === 'paused'
+  const dlErr = status === 'error' ? dlJob?.error : null
+  const pct = dlJob?.progress ?? 0
 
   const uninstall = async () => {
     setBusy(true)
@@ -16,10 +23,12 @@ function ModelCard({ m, onDownload, reload }) {
   }
 
   return (
-    <article className="mcard">
-      <span className="eng">{m.engine}</span>
-      {m.tier && <span className={`tag ${m.tier === 'user' ? 'user' : m.tier === 'starter' ? 'starter' : ''}`}>{m.tier}</span>}
-      <h3>{m.name}</h3>
+    <article className="mcard flex flex-col">
+      <div className="flex items-center gap-2">
+        <span className="eng">{m.engine}</span>
+        {m.tier && <span className={`tag ${m.tier === 'user' ? 'user' : m.tier === 'starter' ? 'starter' : ''}`}>{m.tier}</span>}
+      </div>
+      <h3 className="mt-2">{m.name}</h3>
       <code className="hf">{m.hf_id}</code>
       <p className="notes">{m.notes}</p>
       <div className="meta">
@@ -29,8 +38,20 @@ function ModelCard({ m, onDownload, reload }) {
         <span>{m.task}</span>
         <span title="popularity on HuggingFace">⬇ {(m.downloads || 0).toLocaleString()}</span>
       </div>
-      <div className="mt-1 flex items-center gap-2">
-        {m.cloud ? (
+
+      <div className="mt-3 flex items-center gap-2" style={{ borderTop: '1px dashed rgba(128,128,128,.3)', paddingTop: 10 }}>
+        <button className="btn ghost !py-1 !px-2 text-xs" onClick={() => setDetail(true)}>
+          ⚙ Details
+        </button>
+        <a className="btn ghost !py-1 !px-2 text-xs" href={`https://huggingface.co/${m.hf_id}`}
+          target="_blank" rel="noreferrer" title="Open the official model card on HuggingFace"
+          style={{ opacity: m.hf_id.startsWith('builtin:') || m.cloud ? 0.35 : 1, pointerEvents: m.hf_id.startsWith('builtin:') || m.cloud ? 'none' : 'auto' }}>
+          Open on HF ↗
+        </a>
+        <div className="ml-auto flex items-center gap-2" style={{ whiteSpace: 'nowrap' }}>
+          {dlErr ? (
+            <span className="text-[12px]" style={{ color: '#b42318' }} title={dlErr}>Download failed</span>
+          ) : m.cloud ? (
           <span className="text-[12px]" style={{ color: 'var(--amber)' }}>
             Cloud — needs the OXR switch in Settings
           </span>
@@ -43,6 +64,14 @@ function ModelCard({ m, onDownload, reload }) {
           </>
         ) : builtin ? (
           <span className="text-[12px]" style={{ color: 'var(--ink-soft)' }}>Part of this hub — nothing to download</span>
+        ) : dlActive ? (
+          <button className="btn ghost !py-1 !px-2 text-xs" disabled={busy} onClick={async () => {
+            setBusy(true); try { await api.pauseDownload(m.hf_id) } catch (e) { alert(e.message) }; setBusy(false)
+          }}>⏸ Pause</button>
+        ) : dlPaused ? (
+          <button className="btn ghost !py-1 !px-2 text-xs" disabled={busy} onClick={async () => {
+            setBusy(true); try { await api.download(m.hf_id) } catch (e) { alert(e.message) }; setBusy(false)
+          }}>▶ Resume</button>
         ) : (
           <button className="btn primary" disabled={busy || m.downloading} onClick={async () => {
             setBusy(true)
@@ -52,12 +81,40 @@ function ModelCard({ m, onDownload, reload }) {
             {m.downloading ? 'Downloading…' : 'Download model'}
           </button>
         )}
+        </div>
       </div>
+
+      {(dlActive || dlPaused || dlErr) && (
+        <div className="mt-2">
+          {dlErr ? (
+            <div className="err text-[12px]">{dlErr}</div>
+          ) : (
+            <>
+              <div style={{ height: 6, borderRadius: 999, background: 'color-mix(in srgb, var(--ink-soft) 20%, transparent)', overflow: 'hidden' }}>
+                <div style={{
+                  width: `${pct}%`, height: '100%', borderRadius: 999,
+                  background: dlPaused ? 'var(--amber)' : 'var(--scan)',
+                  transition: 'width .6s ease',
+                }} />
+              </div>
+              <div className="flex justify-between text-[11px] mono mt-1" style={{ color: 'var(--ink-soft)' }}>
+                <span>{dlPaused ? 'Paused' : 'Downloading'} · {pct}%</span>
+                <span>{m.name}</span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {detail && (
+        <ModelDetail m={m} onClose={() => setDetail(false)}
+          onRun={(hfId) => { location.hash = `#playground:${hfId}`; onClose?.() }} />
+      )}
     </article>
   )
 }
 
-export default function Catalog({ models, reload }) {
+export default function Catalog({ models, reload, dlJobs = {} }) {
   const [hfRepo, setHfRepo] = useState('')
   const [preview, setPreview] = useState(null)
   const [err, setErr] = useState('')
@@ -128,7 +185,7 @@ export default function Catalog({ models, reload }) {
         <>
           <h3 className="mb-3 text-lg font-semibold tracking-tight">Ready in seconds — under 1 GB</h3>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 mb-8">
-            {filt(starter).map((m) => <ModelCard key={m.hf_id} m={m} reload={reload} />)}
+            {filt(starter).map((m) => <ModelCard key={m.hf_id} m={m} reload={reload} dlJob={dlJobs[m.hf_id]} />)}
           </div>
         </>
       )}
@@ -138,7 +195,7 @@ export default function Catalog({ models, reload }) {
 
       <h3 className="mb-3 text-lg font-semibold tracking-tight">Model library</h3>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {filt(lib).map((m) => <ModelCard key={m.hf_id} m={m} reload={reload} />)}
+        {filt(lib).map((m) => <ModelCard key={m.hf_id} m={m} reload={reload} dlJob={dlJobs[m.hf_id]} />)}
         {filt(lib).length === 0 && (
           <p className="text-sm" style={{ color: 'var(--ink-soft)' }}>Nothing matches “{filter}” here.</p>
         )}

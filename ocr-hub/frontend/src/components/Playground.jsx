@@ -134,6 +134,12 @@ export default function Playground({ models, devices, tabVisible }) {
   const usable = models.filter((m) => m.installed)
   const devOpts = devices ? Object.entries(devices.devices).map(([k, d]) => ({ k, ...d })) : []
 
+  /* prefill selection when arriving via "#playground:<hfId>" */
+  useEffect(() => {
+    const pre = window.__prefillModel
+    if (pre) { window.__prefillModel = null; setSelected((s) => s.includes(pre) ? s : [...s, pre]) }
+  }, [])
+
   /* live results over WS — card flips the moment its job finishes */
   useEffect(() => {
     if (!runId) return
@@ -142,6 +148,7 @@ export default function Playground({ models, devices, tabVisible }) {
       try {
         const evt = JSON.parse(e.data)
         if (evt.type !== 'run' || evt.run_id !== runId) return
+        if (evt.status === 'complete') { setRunning(false); return }
         setPages((ps) => {
           if (!ps) return ps
           const idx = (evt.page || 1) - 1
@@ -160,6 +167,12 @@ export default function Playground({ models, devices, tabVisible }) {
             }
           })
         })
+        // safety: if the batch-complete event was missed, finish the button
+        // state as soon as every card on every page is done
+        try {
+          const allDone = ps.every((pg) => pg.results.every((rr) => !isRunning(rr)))
+          if (allDone) setRunning(false)
+        } catch {}
       } catch {}
     }
     return () => ws.close()
@@ -193,13 +206,23 @@ export default function Playground({ models, devices, tabVisible }) {
     try {
       const res = await submit({ model_ids: selected })
       setDeviceResolved(res.device); setRunId(res.run_id)
-      setPages(res.pages.map((p) => ({ ...p, results: p.results.map((r) => ({ ...r, _status: 'done' })) })))
       setIsPdf(res.is_pdf)
+      // real page images immediately, but cards stay pending — each flips to
+      // done individually as its WS event arrives
+      setPages(res.pages.map((p) => ({
+        page: p.page,
+        image: p.image,
+        results: selected.map((id) => {
+          const card = models.find((m) => m.hf_id === id)
+          return { model_id: id, name: card?.name || id, _status: 'pending', blocks: [] }
+        }),
+      })))
+      setActivePage(0)
     } catch (e) {
       setPages(null)
+      setRunning(false)
       window.appToast?.(`!Run failed: ${e.message}`, 'err')
     }
-    setRunning(false)
   }
 
   const retryModel = async (pageNo, modelId) => {

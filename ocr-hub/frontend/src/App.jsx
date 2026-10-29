@@ -1,12 +1,14 @@
 import React, { Component, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import Catalog from './components/Catalog'
+import Compare from './components/Compare'
 import Playground from './components/Playground'
 import SettingsPage from './components/SettingsPage'
 
 const TABS = [
   { id: 'catalog', label: 'Catalog', icon: '▤' },
   { id: 'playground', label: 'Playground', icon: '⦿' },
+  { id: 'compare', label: 'Compare', icon: '⇄' },
   { id: 'settings', label: 'Settings', icon: '⛭' },
 ]
 
@@ -60,8 +62,35 @@ export default function App() {
   const [devices, setDevices] = useState(null)
   const [models, setModels] = useState([])
   const [dl, setDl] = useState(null)
+  const [dlJobs, setDlJobs] = useState({})
+  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light')
   const wsRef = useRef(null)
-  const reload = () => api.models().then((d) => setModels(d.models)).catch(() => {})
+  const reload = () => api.models().then((d) => {
+    setModels(d.models)
+    setDlJobs((x) => {
+      const y = { ...x }
+      for (const job of d.downloads || []) y[job.repo] = { type: 'download', repo: job.repo, ...x[job.repo], ...job }
+      return y
+    })
+  }).catch(() => {})
+
+  /* apply persisted theme on startup */
+  useEffect(() => {
+    document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light'
+  }, [])
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
+
+  /* deep-link from ModelDetail: #playground:<hfId> */
+  useEffect(() => {
+    const h = () => {
+      const match = location.hash.match(/#playground:(.+)$/)
+      if (match) { window.__prefillModel = decodeURIComponent(match[1]); location.hash = ''; setTab('playground') }
+    }
+    h(); window.addEventListener('hashchange', h)
+    return () => window.removeEventListener('hashchange', h)
+  }, [])
 
   useEffect(() => {
     api.devices().then(setDevices).catch((e) => pushToast(`!Device check failed: ${e.message}`, 'err'))
@@ -72,6 +101,7 @@ export default function App() {
         const evt = JSON.parse(e.data)
         if (evt.type === 'run') return
         if (evt.type !== 'download') return
+        setDlJobs((x) => ({ ...x, [evt.repo]: evt }))
         const short = evt.repo.split('/').pop()
         if (evt.status === 'running' || evt.status === 'queued') {
           setDl({ name: short, pct: evt.progress ?? 0 })
@@ -115,12 +145,19 @@ export default function App() {
                 {d.label.split(' ')[0]}
               </div>
             ))}
+            <button className="nav-btn mt-2 text-[13px]" onClick={() => {
+              const next = theme === 'dark' ? 'light' : 'dark'
+              setTheme(next); localStorage.setItem('theme', next)
+            }} title="Toggle light / dark mode">
+              <span aria-hidden>{theme === 'dark' ? '☀' : '🌙'}</span> Theme: {theme}
+            </button>
           </div>
         </aside>
 
         <main className="content">
-          <div hidden={tab !== 'catalog'}><Catalog models={models} reload={reload} devices={devices} /></div>
+          <div hidden={tab !== 'catalog'}><Catalog models={models} dlJobs={dlJobs} reload={reload} devices={devices} /></div>
           <div hidden={tab !== 'playground'}><Playground models={models} devices={devices} tabVisible={tab === 'playground'} /></div>
+          <div hidden={tab !== 'compare'}><Compare models={models} /></div>
           <div hidden={tab !== 'settings'}><SettingsPage /></div>
         </main>
       </div>
