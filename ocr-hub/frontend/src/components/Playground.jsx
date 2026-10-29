@@ -127,6 +127,7 @@ export default function Playground({ models, devices, tabVisible }) {
   const [deviceResolved, setDeviceResolved] = useState(null)
   const [activePage, setActivePage] = useState(0)
   const [runId, setRunId] = useState(null)
+  const [running, setRunning] = useState(false)
   const [retryMap, setRetryMap] = useState({}) // "page:model_id" -> bool
   const fileRef = useRef(null)
 
