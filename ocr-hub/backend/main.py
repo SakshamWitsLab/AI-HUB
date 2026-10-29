@@ -232,9 +232,9 @@ def _run_one(hf_id: str, img_path: str, device: str, cfg: dict | None = None,
     card = _card_for(hf_id)
     engine = "docling" if card.get("engine") == "docling" else card.get("engine", "transformers")
     ctx = ctx or {}
-    notify = lambda status, progress=0, extra=None: hf.downloads.run_event(
+    notify = lambda status, progress=0, result=None: hf.downloads.run_event(
         run_id=ctx.get("run_id"), page=ctx.get("page"), model_id=hf_id,
-        status=status, progress=progress, **(extra or {}))
+        status=status, progress=progress, result=result)
 
     if engine == "somark-remote":
         if not store.load_settings().get("oxr_cloud_enabled"):

@@ -7,17 +7,10 @@ test several models **in parallel** on the playground with bounding-box overlays
 ## Run
 
 ```bash
-# macOS native (supports Apple MPS / Metal GPU) — recommended on Apple Silicon
-./run-native.sh
-
-# Docker — CPU profile
-docker compose --profile cpu up
-
-# Docker — NVIDIA GPU profile (Linux)
-docker compose --profile gpu up
+make up        # build + start  →  http://localhost:8990
 ```
 
-Open **http://localhost:8990** (native) or **http://localhost:8990** (Docker maps 8990→8000).
+That's it — see [Makefile targets](#makefile) below (uses Docker Compose under the hood).
 
 ## Sections
 
@@ -54,9 +47,16 @@ ocr-hub/
 ├── frontend/          Vite + React + Tailwind (built dist served by backend)
 ├── data/              mounted volume: models/, config.json, results/
 ├── docker-compose.yml # --profile cpu | --profile gpu
-├── run-native.sh      # macOS native, enables MPS
+### Makefile
+| Target | What it does |
+|---|---|
+| `make up` | build image + start → http://localhost:8990 |
+| `make stop` | stop the container (models in `data/` are kept) |
+| `make logs` | follow backend logs |
+| `make front` | rebuild the frontend bundle + restart container |
+| `make clean` | remove container + downloaded models (fresh start) |
 ```
 
 - Models are stored under `data/models/<org>__<name>/`.
 - `data/config.json` holds your HF token locally — nothing leaves your machine except HuggingFace calls.
-- Docker on macOS cannot access Metal/MPS GPU — use `./run-native.sh` there; pick the GPU profile on Linux/NVIDIA.
+- Docker on macOS can't access Metal/MPS GPU — CPU is used there; run `--profile gpu` on Linux/NVIDIA hosts for CUDA.
