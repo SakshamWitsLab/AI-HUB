@@ -255,26 +255,54 @@ downloads = DownloadManager()
 OXR_API = "https://free-oxr.somark.ai/api/v1"
 
 
-def oxr_parse(img_path: str) -> list:
+def oxr_parse(img_path: str, max_retries: int = 2) -> list:
     """Parse one page via OXR's free API (POST {OXR_API}/parse/sync).
     Returns blocks in our standard shape. The user's file is uploaded to
-    SoMark's servers — gated by the 'Enable cloud parsing' setting."""
+    SoMark's servers — gated by the 'Enable cloud parsing' setting.
+
+    The free endpoint allows one task at a time; on HTTP 429 (code 1133,
+    "task is already in progress") we retry with backoff instead of failing
+    the page."""
+    import time as _time
     import requests
 
     fname = Path(img_path).name
     is_pdf = fname.endswith(".pdf")
     mime = "application/pdf" if is_pdf else "image/png"
     fname = fname if fname.lower().endswith((".pdf", ".png", ".jpg", ".jpeg", ".webp")) else ("page.pdf" if is_pdf else "page.png")
-    with open(img_path, "rb") as f:
-        r = requests.post(
-            f"{OXR_API}/parse/sync",
-            files={"file": (fname, f, mime)},
-            data={"api_key": "dummy", "output_formats": "markdown", "output_formats": "json"},
-            timeout=900,
-        )
-    if r.status_code != 200:
-        raise ValueError(f"HTTP {r.status_code}: {r.text[:200]}")
-    j = r.json()
+
+    attempt, delay, last_err = 0, 2.0, None
+    while attempt <= max_retries:
+        attempt += 1
+        try:
+            with open(img_path, "rb") as f:
+                r = requests.post(
+                    f"{OXR_API}/parse/sync",
+                    files={"file": (fname, f, mime)},
+                    data={"api_key": "dummy", "output_formats": "markdown", "output_formats": "json"},
+                    timeout=900,
+                )
+            if r.status_code == 200:
+                j = r.json()
+                break
+            if r.status_code == 429:
+                # honor Retry-After when the server provides one
+                wait = r.headers.get("Retry-After")
+                delay = max(delay, float(wait)) if wait and wait.isdigit() else delay
+                last_err = f"HTTP 429: {r.text[:200]}"
+            else:
+                raise ValueError(f"HTTP {r.status_code}: {r.text[:200]}")
+        except ValueError:
+            raise
+        except Exception as e:
+            last_err = str(e)[:200]
+        if attempt <= max_retries:
+            _time.sleep(delay)
+            delay = min(delay * 2, 15.0)
+    else:
+        raise ValueError(f"OXR rate limited after {max_retries + 1} attempts — {last_err}")
+    if attempt > max_retries and r is not None and r.status_code != 200:
+        raise ValueError(f"OXR rate limited: {last_err}")
 
     pages = ((j.get("data") or {}).get("result") or {}).get("outputs") or {}
     blocks = []

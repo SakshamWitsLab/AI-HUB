@@ -43,15 +43,18 @@ function AnnotatedImage({ url, blocks, showBoxes }) {
 function isRunning(r) { return r._status === 'pending' || r._status === 'running' }
 
 function LoadingCard({ result }) {
+  const live = result._status === 'running'
   return (
     <div className="result loading-glass" aria-busy="true">
       <div className="result-head">
         <b>{result.name}</b>
-        <span className="elapsed">{result._status === 'running' ? 'running…' : 'queued…'}</span>
+        <span className="elapsed">{live ? 'running…' : 'queued…'}</span>
       </div>
       <div className="shimmer" />
-      <p className="text-sm" style={{ color: 'var(--ink-soft)' }}>
-        {result._status === 'running' ? 'Model is reading the page — results land here the moment they finish.' : 'Waiting for a runner slot…'}
+      <p className="text-sm mono" style={{ color: 'var(--ink-soft)' }}>
+        {live
+          ? (result.message || 'Model is reading the page — results land here the moment they finish.')
+          : 'Waiting for a runner slot…'}
       </p>
     </div>
   )
@@ -162,7 +165,9 @@ export default function Playground({ models, devices, tabVisible }) {
                   return { ...evt.result, _status: 'done' }
                 if (evt.status === 'error' && evt.result?.blocks != null)
                   return { ...evt.result, _status: 'done' }
-                return { ...r, _status: evt.status === 'running' ? 'running' : r._status }
+                if (evt.status === 'running')
+                  return { ...r, _status: 'running', message: evt.message || '(working…)' }
+                return { ...r }
               }),
             }
           })
@@ -296,17 +301,43 @@ export default function Playground({ models, devices, tabVisible }) {
             <button className="btn ghost" onClick={() => { setSource(null); setPages(null) }}>Remove file</button>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <b className="text-sm">Models</b>
-          {usable.length === 0 && (
-            <span className="text-sm" style={{ color: 'var(--ink-soft)' }}>Nothing installed yet — grab one from the Catalog.</span>
-          )}
-          {usable.map((m) => (
-            <button key={m.hf_id} className={`chip ${selected.includes(m.hf_id) ? 'on' : ''}`}
-              onClick={() => setSelected((s) => s.includes(m.hf_id) ? s.filter((x) => x !== m.hf_id) : [...s, m.hf_id])}>
-              {m.name}
-            </button>
-          ))}
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <b className="text-sm">Models</b>
+            {usable.length === 0 && (
+              <span className="text-sm" style={{ color: 'var(--ink-soft)' }}>Nothing installed yet — grab one from the Catalog.</span>
+            )}
+          </div>
+          {(() => {
+            const order = [
+              'Commercial OCR APIs (API Required)',
+              'Vision-Language OCR (VLM-based)',
+              'Document Parsing and Intelligence Frameworks',
+              'Scientific Document OCR',
+              'Transformer-Based OCR',
+              'Fast / Lightweight OCR',
+              'Traditional OCR Engines',
+              'PDF Extraction and OCR Utilities',
+              'Other OCR Models and Tools',
+            ]
+            const groups = new Map(usable.map((m) => [m.category || 'Other', []]))
+            for (const m of usable) groups.get(m.category || 'Other').push(m)
+            const sorted = [...groups.entries()].sort((a, b) =>
+              (order.indexOf(a[0]) + 1 || 99) - (order.indexOf(b[0]) + 1 || 99))
+            return sorted.map(([cat, ms]) => (
+              <div key={cat} className="flex flex-wrap items-center gap-2">
+                <span className="mono text-[11px]" style={{ color: 'var(--ink-soft)', minWidth: 110 }}>
+                  {cat.replace(' (API Required)', '')}
+                </span>
+                {ms.map((m) => (
+                  <button key={m.hf_id} className={`chip ${selected.includes(m.hf_id) ? 'on' : ''}`}
+                    onClick={() => setSelected((s) => s.includes(m.hf_id) ? s.filter((x) => x !== m.hf_id) : [...s, m.hf_id])}>
+                    {m.name}
+                  </button>
+                ))}
+              </div>
+            ))
+          })()}
           <select className="input !w-48" value={device} onChange={(e) => setDevice(e.target.value)}>
             <option value="auto">Auto</option>
             {devOpts.map((d) => (

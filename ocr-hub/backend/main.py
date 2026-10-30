@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,21 @@ WARMUP = None  # placeholder for device runner warmup
 # --------------------------------------------------------------------------- #
 # Models & catalog
 # --------------------------------------------------------------------------- #
+_gpu_available: bool | None = None
+
+
+def _has_gpu() -> bool:
+    """Cached CUDA check — avoids a heavy torch import in most requests."""
+    global _gpu_available
+    if _gpu_available is None:
+        try:
+            import torch
+            _gpu_available = bool(torch.cuda.is_available())
+        except ImportError:
+            _gpu_available = False
+    return _gpu_available
+
+
 def _merge_catalog():
     s = store.load_settings()
     catalog = store.load_catalog()
@@ -37,13 +53,31 @@ def _merge_catalog():
         if c["hf_id"].startswith("builtin:"):
             c["installed"] = True
         elif c.get("cloud"):
-            c["installed"] = bool(s.get("oxr_cloud_enabled"))
+            c["installed"] = bool(
+            s.get("oxr_cloud_enabled") or s.get("cloud_parse_enabled"))
+        if c.get("engine") in ("mistral-ocr", "llamaparse", "reducto", "unstructured"):
+            c["installed"] = bool(
+                s.get("cloud_parse_enabled")
+                and bool(s.get({"mistral-ocr": "mistral_api_key",
+                                "llamaparse": "llama_cloud_api_key",
+                                "reducto": "reducto_api_key",
+                                "unstructured": "unstructured_api_key"}[c["engine"]], "")
+                         or os.environ.get({"mistral-ocr": "MISTRAL_API_KEY",
+                                            "llamaparse": "LLAMA_CLOUD_API_KEY",
+                                            "reducto": "REDUCTO_API_KEY",
+                                            "unstructured": "UNSTRUCTURED_API_KEY"}[c["engine"]])))
         else:
             c["installed"] = store.is_installed(c["hf_id"])
         c["downloading"] = (
             c["hf_id"] in hf.downloads.jobs
             and hf.downloads.jobs[c["hf_id"]].get("status") in ("running", "queued")
         )
+        # GPU-only engines offer nothing runnable on a CPU host — surface it
+        # so the UI/reader doesn't queue runs that are guaranteed to fail
+        if c.get("engine") == "nvidia-native" or c.get("gpu_only"):
+            c["available"] = _has_gpu()
+            if not c["available"]:
+                c["unavailable_reason"] = "Requires a CUDA GPU (Linux). Not runnable on this host."
     return catalog
 
 
@@ -387,6 +421,11 @@ def get_settings():
     s = store.load_settings()
     s["hf_token"] = ("•" * 8 + s["hf_token"][-4:]) if s["hf_token"] else ""
     s["hf_token_set"] = bool(s["hf_token"])
+    # never echo full provider keys back to the browser — mask, keep hint
+    for k in ("mistral_api_key", "llama_cloud_api_key", "reducto_api_key",
+              "unstructured_api_key"):
+        s["_orig_" + k] = s[k]
+        s[k] = ("…" + s[k][-4:]) if len(s.get(k, "")) > 4 else s[k]
     return s
 
 
@@ -395,6 +434,13 @@ class SettingsPatch(BaseModel):
     device_preference: str | None = None
     parallel_limit: int | None = None
     oxr_cloud_enabled: bool | None = None
+    cloud_parse_enabled: bool | None = None
+    mistral_api_key: str | None = None
+    llama_cloud_api_key: str | None = None
+    reducto_api_key: str | None = None
+    unstructured_api_key: str | None = None
+    unstructured_api_url: str | None = None
+    omniparse_url: str | None = None
 
 
 @app.put("/api/settings")
@@ -459,8 +505,121 @@ def pdf_to_pages(pdf_path: str) -> list[str]:
 GLOBAL_EXECUTOR = ThreadPoolExecutor(max_workers=6)
 
 
+_engine_semaphores: dict = {}
+
+
 def _run_one(hf_id: str, img_path: str, device: str, cfg: dict | None = None,
              ctx: dict | None = None) -> dict:
+    """Run one model on one page, throttled per engine. One task at a time
+    for: OXR cloud (free endpoint allows a single concurrent parse per key —
+    concurrent requests 429 with "task is already in progress") and heavy
+    torch engines (docling / nvidia-native) whose subprocess loads a full
+    model — running 4 copies at once spikes memory/CPU in Docker."""
+    t0 = time.time()
+    card = _card_for(hf_id)
+    engine = "docling" if card.get("engine") == "docling" else card.get("engine", "transformers")
+    ctx = ctx or {}
+    notify = lambda status, progress=0, result=None, **kw: hf.downloads.run_event(
+        run_id=ctx.get("run_id"), page=ctx.get("page"), model_id=hf_id,
+        status=status, progress=progress, result=result, **kw)
+
+    serial = engine in ("somark-remote", "docling", "nvidia-native", "llamaparse")
+    key = engine if serial or engine in ("mistral-ocr", "reducto", "unstructured") else hf_id
+    if key not in _engine_semaphores:
+        _engine_semaphores[key] = threading.Semaphore(1 if serial else 2)
+    sem = _engine_semaphores[key]
+    while not sem.acquire(blocking=True, timeout=2.0):  # non-silent queue wait
+        notify("running", 0, message=f"Waiting — {engine} processes one page at a time "
+                                     f"({round(time.time() - t0, 1)}s queued)")
+    try:
+        return _run_one_impl(hf_id, img_path, device, cfg, ctx)
+    finally:
+        sem.release()
+
+
+def _run_cloud_util(engine: str, hf_id: str, card: dict, img_path: str,
+                    ctx: dict, t0: float, notify) -> dict:
+    """Subprocess-free cloud/utility engines (see backend/cloud_ocr.py)."""
+    from . import cloud_ocr
+
+    def _bad(msg: str) -> dict:
+        out = {"model_id": hf_id, "name": card.get("name", hf_id), "engine": engine,
+               "elapsed_s": round(time.time() - t0, 2), "blocks": [], "error": msg}
+        notify("done", result=out)
+        return out
+
+    settings = store.load_settings()
+    if engine == "pymupdf":
+        pdf_path = ctx.get("pdf_path")
+        if not pdf_path or not Path(pdf_path).exists():
+            return _bad("PyMuPDF reads the PDF's embedded text layer directly — "
+                        "it only works on PDF uploads (not single page images).")
+        try:
+            blocks = cloud_ocr.render_pymupdf_to_blocks(pdf_path, int(ctx.get("page") or 1))
+        except Exception as e:
+            return _bad(str(e)[:400])
+        out = {"model_id": hf_id, "name": card.get("name", hf_id), "engine": engine,
+               "device": "local", "elapsed_s": round(time.time() - t0, 2),
+               "blocks": _sanitize(blocks), "error": None}
+        notify("done", result=out)
+        return out
+
+    if engine == "omniparse":
+        host = settings.get("omniparse_url", "")
+        if not host:
+            return _bad("OmniParse is self-hosted — set its server URL in Settings "
+                        "(e.g. http://gpu-box:8000). It needs a Linux/GPU host; see the "
+                        "adithya-s-k/omniparse repo for the docker command.")
+        if not (ctx.get("pdf_path") or Path(img_path).suffix.lower() == ".pdf"):
+            return _bad("OmniParse document endpoint ingests PDFs — upload a document.")
+        try:
+            blocks = cloud_ocr.run_omniparse(ctx.get("pdf_path") or img_path, host)
+        except Exception as e:
+            return _bad(f"OmniParse error: {str(e)[:400]}")
+        out = {"model_id": hf_id, "name": card.get("name", hf_id), "engine": engine,
+               "device": "remote-host", "elapsed_s": round(time.time() - t0, 2),
+               "blocks": _sanitize(blocks), "error": None}
+        notify("done", result=out)
+        return out
+
+    # gated cloud providers
+    if not settings.get("cloud_parse_enabled"):
+        return _bad("Cloud parsing is off — enable 'Cloud document APIs' in Settings")
+    keys = {
+        "mistral-ocr": ("mistral_api_key", "MISTRAL_API_KEY",
+                        "Add your MISTRAL_API_KEY in Settings → API Keys"),
+        "llamaparse": ("llama_cloud_api_key", "LLAMA_CLOUD_API_KEY",
+                       "Add your LLAMA_CLOUD_API_KEY in Settings → API Keys"),
+        "reducto": ("reducto_api_key", "REDUCTO_API_KEY",
+                    "Add your REDUCTO_API_KEY in Settings → API Keys"),
+        "unstructured": ("unstructured_api_key", "UNSTRUCTURED_API_KEY",
+                         "Add your UNSTRUCTURED_API_KEY (or self-hosted URL) in Settings"),
+    }
+    setting_key, env_key, hint = keys[engine]
+    api_key = cloud_ocr._key(settings, setting_key, env_key)
+    if not api_key and engine != "unstructured":
+        return _bad(hint)
+    try:
+        if engine == "mistral-ocr":
+            blocks = cloud_ocr.run_mistral(img_path, api_key)
+        elif engine == "llamaparse":
+            blocks = cloud_ocr.run_llamaparse(ctx.get("pdf_path") or img_path, api_key)
+        elif engine == "reducto":
+            blocks = cloud_ocr.run_reducto(img_path, api_key)
+        else:
+            blocks = cloud_ocr.run_unstructured(
+                img_path, api_key, settings.get("unstructured_api_url", ""))
+    except Exception as e:
+        return _bad(f"{engine} error: {str(e)[:400]}")
+    out = {"model_id": hf_id, "name": card.get("name", hf_id), "engine": engine,
+           "device": "cloud", "elapsed_s": round(time.time() - t0, 2),
+           "blocks": _sanitize(blocks), "error": None}
+    notify("done", result=out)
+    return out
+
+
+def _run_one_impl(hf_id: str, img_path: str, device: str, cfg: dict | None = None,
+                  ctx: dict | None = None) -> dict:
     """Run one model on one page. Cloud models (OXR) go through their API in
     a subprocess-free fast path; local models run in an isolated subprocess,
     so a crash can't kill the hub."""
@@ -468,9 +627,23 @@ def _run_one(hf_id: str, img_path: str, device: str, cfg: dict | None = None,
     card = _card_for(hf_id)
     engine = "docling" if card.get("engine") == "docling" else card.get("engine", "transformers")
     ctx = ctx or {}
-    notify = lambda status, progress=0, result=None: hf.downloads.run_event(
+
+    # GPU-only engines: fail fast without spawning a runner subprocess on a
+    # CUDA-less host (nemotron needs Linux + CUDA; MPS/CPU can't host it)
+    deploy_device = device if device != "auto" else "cpu"
+    if (engine == "nvidia-native" or card.get("gpu_only")) and not _has_gpu():
+        out = {"model_id": hf_id, "name": card.get("name", hf_id), "engine": engine,
+               "elapsed_s": 0, "blocks": [],
+               "error": "GPU-only model — this model requires a Linux host with a CUDA GPU "
+                        "(this machine has none). Pick Docling / TrOCR / EasyOCR / Tesseract / "
+                        "PyMuPDF or a cloud engine locally."}
+        hf.downloads.run_event(run_id=ctx.get("run_id"), page=ctx.get("page"), model_id=hf_id,
+                               status="done", result=out)
+        return out
+
+    notify = lambda status, progress=0, result=None, **kw: hf.downloads.run_event(
         run_id=ctx.get("run_id"), page=ctx.get("page"), model_id=hf_id,
-        status=status, progress=progress, result=result)
+        status=status, progress=progress, result=result, **kw)
 
     if engine == "somark-remote":
         if not store.load_settings().get("oxr_cloud_enabled"):
@@ -493,6 +666,10 @@ def _run_one(hf_id: str, img_path: str, device: str, cfg: dict | None = None,
             notify("done", result=out)
             return out
 
+    # ---- cloud/utility fast paths (no subprocess, no torch) ----
+    if engine in ("pymupdf", "mistral-ocr", "llamaparse", "reducto", "unstructured", "omniparse"):
+        return _run_cloud_util(engine, hf_id, card, img_path, ctx, t0, notify)
+
     cfg = cfg or {}
     notify("starting", 0)
 
@@ -509,24 +686,53 @@ def _run_one(hf_id: str, img_path: str, device: str, cfg: dict | None = None,
             tmp_cfg = tf.name
 
         notify("running", 5)
-        proc = subprocess.run(
+        stderr_buf: list = []
+        proc = subprocess.Popen(
             [sys.executable, "-m", "backend.runner_cli", tmp_cfg],
-            capture_output=True, text=True,
-            timeout=int(cfg.get("timeout_s", 900)),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=str(ROOT_DIR),
             env={**os.environ, "PYTHONPATH": str(ROOT_DIR)},
         )
-        last = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "{}"
+        timeout_s = int(cfg.get("timeout_s", 900))
+        deadline, last_activity = t0 + timeout_s, ""
+
+        def _drain(stream, sink):  # avoid pipe-buffer deadlock + keep log tail
+            try:
+                for ln in iter(stream.readline, ""):
+                    ln = ln.strip()
+                    if ln and not any(k in ln for k in (
+                            "Warning", "warnings.warn", "deprecated")):
+                        sink.append(ln)
+            except Exception:
+                pass
+
+        err_d = threading.Thread(target=_drain, args=(proc.stderr, stderr_buf), daemon=True)
+        err_d.start()
+        while proc.poll() is None:
+            if time.time() >= deadline:
+                proc.kill()
+                proc.wait()
+                raise subprocess.TimeoutExpired(proc.args, timeout_s)
+            time.sleep(2.0)
+            # live narration: elapsed + last meaningful engine line
+            if stderr_buf:
+                last_activity = " · ".join(stderr_buf[-1].split(" / ")[-1:] or [""])[:120]
+            notify("running", min(99, int((time.time() - t0) / max(deadline - t0, 1) * 100)),
+                   message=f"{round(time.time() - t0, 1)}s"
+                           + (f" · {last_activity}" if last_activity else ""))
+        proc.wait()
+        stdout_all = proc.stdout.read() or ""
+
+        last = stdout_all.strip().splitlines()[-1] if stdout_all.strip() else "{}"
         try:
             data = json.loads(last)
         except Exception:
-            data = {"crash": (proc.stderr or proc.stdout or "no output")[-300:]}
+            data = {"crash": (stdout_all or "no output")[-300:]}
 
         if data.get("crash") or (proc.returncode not in (0, 3) and not data.get("blocks")):
             tail = f"Runner crashed: {str(data.get('crash'))[:300]}"
-            stderr_tail = (proc.stderr or "").strip().splitlines()
-            if stderr_tail:
-                tail += f" | engine log: {' / '.join(stderr_tail[-3:])}"
+            if stderr_buf:
+                tail += f" | engine log: {' / '.join(stderr_buf[-3:])}"
             out = {
                 "model_id": hf_id, "name": card.get("name", hf_id), "engine": engine,
                 "elapsed_s": round(time.time() - t0, 2), "blocks": [],
@@ -561,7 +767,7 @@ def _run_one(hf_id: str, img_path: str, device: str, cfg: dict | None = None,
 
 
 def _execute_run(run_id: str, pages: list[str], model_ids: list[str], device: str,
-                 settings: dict, found: dict) -> None:
+                 settings: dict, found: dict, pdf_path: str | None = None) -> None:
     """Run every model × page, emitting live WS events as each one finishes.
     Runs after the HTTP response has been sent — the UI hydrates over /ws."""
 
@@ -582,7 +788,8 @@ def _execute_run(run_id: str, pages: list[str], model_ids: list[str], device: st
         # never blocks the others — they start as soon as a worker slot frees
         tasks = {}
         for idx, page_path in enumerate(pages):
-            ctx = {"run_id": run_id, "page": idx + 1, "image": str(page_path)}
+            ctx = {"run_id": run_id, "page": idx + 1, "image": str(page_path),
+                   "pdf_path": pdf_path}
             for hf_id in model_ids:
                 tasks[(idx + 1, hf_id)] = pool.submit(
                     _run_one, hf_id, str(page_path), device, cfg_for(hf_id), ctx)
@@ -628,7 +835,8 @@ async def run(req: RunRequest, background: BackgroundTasks):
         pages = [str(src)]
 
     run_id = f"r{uuid.uuid4().hex[:8]}"
-    background.add_task(_execute_run, run_id, pages, req.model_ids, device, settings, found)
+    background.add_task(_execute_run, run_id, pages, req.model_ids, device, settings, found,
+                        str(src) if is_pdf else None)
     return {"run_id": run_id, "device": device, "is_pdf": is_pdf, "n_pages": len(pages),
             "pages": [{"page": i + 1, "image": str(p)} for i, p in enumerate(pages)]}
 
@@ -701,6 +909,12 @@ async def ws(sock: WebSocket):
 
 @app.get("/api/health")
 def health():
+    return {"ok": True}
+
+
+# alias: external monitors poll /health — previously 404'd (~1/s log spam)
+@app.get("/health", include_in_schema=False)
+def health_alias():
     return {"ok": True}
 
 

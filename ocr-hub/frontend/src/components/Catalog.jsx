@@ -53,7 +53,7 @@ function ModelCard({ m, onDownload, reload, dlJob }) {
             <span className="text-[12px]" style={{ color: '#b42318' }} title={dlErr}>Download failed</span>
           ) : m.cloud ? (
           <span className="text-[12px]" style={{ color: 'var(--amber)' }}>
-            Cloud — needs the OXR switch in Settings
+            Cloud — API key & switch in Settings
           </span>
         ) : installed ? (
           <>
@@ -131,20 +131,36 @@ export default function Catalog({ models, reload, dlJobs = {} }) {
   const starter = models.filter((m) => m.tier === 'starter')
   const lib = models.filter((m) => m.tier !== 'starter')
 
+  const CATS = [
+    'Commercial OCR APIs (API Required)',
+    'Vision-Language OCR (VLM-based)',
+    'Document Parsing and Intelligence Frameworks',
+    'Scientific Document OCR',
+    'Transformer-Based OCR',
+    'Fast / Lightweight OCR',
+    'Traditional OCR Engines',
+    'PDF Extraction and OCR Utilities',
+    'Other OCR Models and Tools',
+  ]
+  const haveCats = new Set(models.map((m) => m.category).filter(Boolean))
+  const cats = CATS.filter((c) => haveCats.has(c))
+      .concat([...haveCats].filter((c) => !CATS.includes(c)))
+
   const filt = (list) =>
     list.filter((m) =>
       filter === 'all' ? true
       : filter === 'under1' ? m.size_gb < 1
       : filter === 'installed' ? (m.installed && !m.hf_id.startsWith('builtin:'))
-      : true,
+      : m.category === filter,
     )
 
   return (
     <>
       <div className="page-head">
         <h2>Library</h2>
-        <div className="flex gap-2">
-          {[['all', 'All'], ['under1', 'Under 1 GB'], ['installed', 'Installed']].map(([k, l]) => (
+        <div className="flex gap-2 flex-wrap justify-end">
+          {[['all', 'All'], ['under1', 'Under 1 GB'], ['installed', 'Installed'],
+            ...cats.map((c) => [c, c.replace(' (API Required)', '').replace(' and Intelligence Frameworks', '')])].map(([k, l]) => (
             <button key={k} className={`chip ${filter === k ? 'on' : ''}`} onClick={() => setFilter(k)}>{l}</button>
           ))}
         </div>

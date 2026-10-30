@@ -1,2 +1,3 @@
 ocr-hub/data/
 .DS_Store
+.venv

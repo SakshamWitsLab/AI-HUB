@@ -10,8 +10,13 @@ services:
       - "8990:8000"
     environment:
       - OCR_HUB_DATA=/data
+      # cap builder threads inside engine runner subprocesses
+      - OCR_HUB_MAX_THREADS=4
     volumes:
       - ./data:/data
+    # keep multi-page runs of heavy engines (docling etc.) from starving the host
+    mem_limit: 4g
+    cpus: 2.0
     profiles: ["cpu"]
 
   # GPU run:      docker compose --profile gpu up      (needs NVIDIA driver + nvidia container toolkit)
@@ -25,6 +30,7 @@ services:
       - "8990:8000"
     environment:
       - OCR_HUB_DATA=/data
+      - OCR_HUB_MAX_THREADS=4
     volumes:
       - ./data:/data
     deploy:

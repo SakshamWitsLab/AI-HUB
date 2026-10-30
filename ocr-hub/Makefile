@@ -1,7 +1,8 @@
-# OCR Hub — short commands over docker compose
-.PHONY: up stop logs front clean build help
+# OCR Hub — short commands over docker compose (up/stop/logs/clean) or local runtime (local*)
+.PHONY: up stop logs front clean build local local-setup local-stop help
 
 COMPOSE = docker compose --profile cpu
+SHELL = /bin/bash
 
 up: build ## build image + start → http://localhost:8990
 	$(COMPOSE) up -d
@@ -26,6 +27,16 @@ clean: ## remove container + downloaded models (fresh start)
 	$(COMPOSE) down --rmi local
 	rm -rf data/models/* data/results/* data/catalog.json
 	@echo "Data reset. Settings (incl. HF token) kept in data/config.json."
+
+local: ## native run, no Docker → http://localhost:8000
+	$(SHELL) scripts/local_up.sh
+
+local-setup: ## (re)install local python deps into .venv
+	$(SHELL) scripts/local_up.sh setup
+
+local-stop: ## kill the native server on port 8000
+	lsof -ti tcp:8000 | xargs kill 2>/dev/null || true
+	@echo "local server stopped"
 
 help: ## show targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'

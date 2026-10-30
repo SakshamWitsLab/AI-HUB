@@ -13,6 +13,14 @@ import sys
 
 CONFIG = json.loads(open(sys.argv[1]).read())
 
+# Cap BLAS/OMP thread pools in the runner subprocess — without this, each of
+# the hub's parallel runners spawns one thread per core and the container's
+# CPU/memory usage explodes under multi-page runs.
+import os
+
+for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TORCH_NUM_THREADS"):
+    os.environ.setdefault(_v, os.environ.get("OCR_HUB_MAX_THREADS", "4"))
+
 
 @contextlib.contextmanager
 def maybe_mps_lock():
@@ -30,7 +38,16 @@ def maybe_mps_lock():
 
 
 def main():
+    import torch
+
     from backend import runner
+
+    # respect OCR_HUB_MAX_THREADS on top of the env vars (torch reads OMP too,
+    # but intra-op pool would default to core count)
+    try:
+        torch.set_num_threads(int(os.environ.get("OCR_HUB_MAX_THREADS", "4")))
+    except Exception:
+        pass
 
     blocks = []
     with maybe_mps_lock():

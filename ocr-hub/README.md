@@ -60,3 +60,16 @@ ocr-hub/
 - Models are stored under `data/models/<org>__<name>/`.
 - `data/config.json` holds your HF token locally — nothing leaves your machine except HuggingFace calls.
 - Docker on macOS can't access Metal/MPS GPU — CPU is used there; run `--profile gpu` on Linux/NVIDIA hosts for CUDA.
+
+
+```
+cd "/Users/saksham/code/AI HUB/ocr-hub"
+python3.12 -m venv .venv && source .venv/bin/activate
+# mirror the Dockerfile's deps:
+pip install fastapi "uvicorn[standard]" websockets huggingface_hub requests \
+    pytesseract pillow pymupdf "transformers<5" sentencepiece protobuf tiktoken \
+    simpleitk docling-core "torch torchvision" easyocr
+brew install tesseract            # tesseract CLI, for the tesseract engine
+export OCR_HUB_DATA="$PWD/data"
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```

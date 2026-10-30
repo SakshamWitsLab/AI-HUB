@@ -61,6 +61,43 @@ export default function SettingsPage() {
           </label>
         </section>
 
+        <section className="mcard">
+          <h3 className="text-[15px] font-semibold">Cloud document APIs</h3>
+          <p className="notes">
+            Keys for Mistral OCR, LlamaParse, Reducto and Unstructured. Env vars (<code className="mono">MISTRAL_API_KEY</code>,
+            <code className="mono">LLAMA_CLOUD_API_KEY</code>, <code className="mono">REDUCTO_API_KEY</code>,
+            <code className="mono">UNSTRUCTURED_API_KEY</code>) override the values here.
+          </p>
+          <label className="flex items-center gap-2 mt-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={!!s.cloud_parse_enabled} onChange={(e) => save({ cloud_parse_enabled: e.target.checked })} />
+            Enable cloud document APIs (files are uploaded to each provider)
+          </label>
+          <div className="flex flex-col gap-2 mt-3">
+            {[
+              ['mistral_api_key', 'Mistral OCR — mistralai'],
+              ['llama_cloud_api_key', 'LlamaParse — llamaindex.ai'],
+              ['reducto_api_key', 'Reducto — reducto.ai'],
+              ['unstructured_api_key', 'Unstructured — unstructured.io'],
+            ].map(([k, label]) => (
+              <div key={k} className="flex gap-2 items-center">
+                <span className="text-xs w-52 shrink-0" style={{ color: 'var(--ink-soft)' }}>{label}</span>
+                <input className="input mono flex-1" placeholder={s[k] || 'paste key…'}
+                  onChange={(e) => save({ [k]: e.target.value })} />
+              </div>
+            ))}
+            <div className="flex gap-2 items-center">
+              <span className="text-xs w-52 shrink-0" style={{ color: 'var(--ink-soft)' }}>Unstructured URL (optional, self-hosted)</span>
+              <input className="input mono flex-1" placeholder={s.unstructured_api_url || 'https://api.unstructured.io'}
+                onChange={(e) => save({ unstructured_api_url: e.target.value })} />
+            </div>
+            <div className="flex gap-2 items-center">
+              <span className="text-xs w-52 shrink-0" style={{ color: 'var(--ink-soft)' }}>OmniParse server URL (self-hosted)</span>
+              <input className="input mono flex-1" placeholder={s.omniparse_url || 'http://gpu-box:8000'}
+                onChange={(e) => save({ omniparse_url: e.target.value })} />
+            </div>
+          </div>
+        </section>
+
         <StoragePanel />
 
         {msg && <p className="text-sm" style={{ color: 'var(--scan)' }}>{msg}</p>}

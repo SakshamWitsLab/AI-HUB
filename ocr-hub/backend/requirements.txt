@@ -13,3 +13,8 @@ sentencepiece
 protobuf
 tiktoken
 torch
+# runtime deps (also installed in the Dockerfile)
+pymupdf
+easyocr
+docling-core
+rapidocr-onnxruntime
